@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "MCP server for Maito — connect Claude/Cursor/Zed to your Maito workspace",
   "license": "AGPL-3.0-only",
+  "homepage": "https://maito.romankov.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maito-app/mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maito-app/mcp-server/issues"
+  },
+  "keywords": ["mcp", "claude", "cursor", "maito", "kanban", "notes"],
   "type": "module",
   "bin": {
     "maito-mcp": "./dist/index.js"
