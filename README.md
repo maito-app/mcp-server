@@ -1,10 +1,10 @@
-# @maito/mcp-server
+# @maito-app/mcp-server
 
 MCP server for [Maito](https://maito.ai) — connect Claude Desktop, Cursor, Zed,
 or any MCP client to your Maito workspace (boards, cards, notes, journal).
 
 ```bash
-npx -y @maito/mcp-server --url https://maito.romankov.dev --token <your-token>
+npx -y @maito-app/mcp-server --url https://maito.romankov.dev --token <your-token>
 ```
 
 Get a token from the Maito web app (Sidebar → **Connect AI**) or from the
@@ -32,7 +32,7 @@ Merge into `~/Library/Application Support/Claude/claude_desktop_config.json`
   "mcpServers": {
     "maito": {
       "command": "npx",
-      "args": ["-y", "@maito/mcp-server", "--url", "https://maito.romankov.dev", "--token", "<your-token>"]
+      "args": ["-y", "@maito-app/mcp-server", "--url", "https://maito.romankov.dev", "--token", "<your-token>"]
     }
   }
 }

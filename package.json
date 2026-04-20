@@ -1,6 +1,6 @@
 {
-  "name": "@maito/mcp-server",
-  "version": "0.1.0",
+  "name": "@maito-app/mcp-server",
+  "version": "0.1.2",
   "description": "MCP server for Maito — connect Claude/Cursor/Zed to your Maito workspace",
   "license": "AGPL-3.0-only",
   "homepage": "https://maito.romankov.dev",
@@ -11,12 +11,22 @@
   "bugs": {
     "url": "https://github.com/maito-app/mcp-server/issues"
   },
-  "keywords": ["mcp", "claude", "cursor", "maito", "kanban", "notes"],
+  "keywords": [
+    "mcp",
+    "claude",
+    "cursor",
+    "maito",
+    "kanban",
+    "notes"
+  ],
   "type": "module",
   "bin": {
-    "maito-mcp": "./dist/index.js"
+    "maito-mcp": "dist/index.js"
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
