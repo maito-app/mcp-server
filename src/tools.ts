@@ -4,10 +4,6 @@ function now(): number {
   return Date.now();
 }
 
-function activeWsId(s: Snapshot): string | null {
-  return s.workspaces?.[0]?.id ?? null;
-}
-
 function err(msg: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
 }
@@ -18,32 +14,110 @@ function ok(obj: unknown) {
   };
 }
 
+function resolveWorkspaceId(data: Snapshot, argWs: unknown): string | null {
+  const all = (data.workspaces ?? []).filter((w) => !w.archived);
+  if (typeof argWs === 'string' && argWs) {
+    const hit = all.find((w) => w.id === argWs);
+    return hit?.id ?? null;
+  }
+  if (all.length === 1) return all[0].id;
+  return null;
+}
+
+/** Maps boardId → workspaceId so we can tag cards with their workspace without extra lookups. */
+function boardWsIndex(data: Snapshot): Map<string, string> {
+  const spaceWs = new Map<string, string>();
+  for (const s of data.spaces ?? []) spaceWs.set(s.id, s.workspaceId);
+  const columnBoard = new Map<string, string>();
+  for (const col of data.columns ?? []) columnBoard.set(col.id, col.boardId);
+  const boardWs = new Map<string, string>();
+  for (const b of data.boards ?? []) {
+    const ws = spaceWs.get(b.spaceId);
+    if (ws) boardWs.set(b.id, ws);
+  }
+  // attach column→ws so cards can be resolved via columnId
+  for (const [colId, boardId] of columnBoard) {
+    const ws = boardWs.get(boardId);
+    if (ws) boardWs.set(colId, ws);
+  }
+  return boardWs;
+}
+
 export const tools = {
-  list_spaces: {
-    description: 'List all spaces in the active workspace.',
+  list_workspaces: {
+    description:
+      'List all workspaces. Each workspace is an isolated container with its own spaces, boards, cards, and notes. Use this first to orient yourself before scoping other queries.',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_args: any, client: MaitoClient) => {
       const { data } = await client.getState();
-      const ws = activeWsId(data);
-      const spaces = (data.spaces ?? []).filter((s) => s.workspaceId === ws && !s.archived);
-      return ok(spaces.map((s) => ({ id: s.id, name: s.name, order: s.order })));
+      const wss = (data.workspaces ?? []).filter((w) => !w.archived);
+      const spaceCount = new Map<string, number>();
+      for (const s of data.spaces ?? []) {
+        if (s.archived) continue;
+        spaceCount.set(s.workspaceId, (spaceCount.get(s.workspaceId) ?? 0) + 1);
+      }
+      return ok(
+        wss.map((w) => ({
+          id: w.id,
+          name: w.name,
+          spaces: spaceCount.get(w.id) ?? 0,
+        })),
+      );
+    },
+  },
+
+  list_spaces: {
+    description:
+      'List spaces. If workspaceId is omitted and there is only one workspace, uses it; otherwise returns spaces from ALL workspaces with workspaceId labelled.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceId: { type: 'string', description: 'Optional workspace id to scope to.' },
+      },
+    },
+    handler: async (args: any, client: MaitoClient) => {
+      const { data } = await client.getState();
+      const wsFilter = resolveWorkspaceId(data, args?.workspaceId);
+      const spaces = (data.spaces ?? []).filter((s) => {
+        if (s.archived) return false;
+        if (args?.workspaceId) return s.workspaceId === args.workspaceId;
+        if (wsFilter) return s.workspaceId === wsFilter;
+        return true;
+      });
+      return ok(
+        spaces.map((s) => ({
+          id: s.id,
+          name: s.name,
+          workspaceId: s.workspaceId,
+          order: s.order,
+        })),
+      );
     },
   },
 
   list_boards: {
-    description: 'List boards, optionally scoped to a space.',
+    description:
+      'List boards. Filter by workspaceId and/or spaceId. Each returned board includes workspaceId + spaceId so callers can see scope.',
     inputSchema: {
       type: 'object',
-      properties: { spaceId: { type: 'string', description: 'Filter by space id' } },
+      properties: {
+        workspaceId: { type: 'string', description: 'Filter by workspace id.' },
+        spaceId: { type: 'string', description: 'Filter by space id.' },
+      },
     },
     handler: async (args: any, client: MaitoClient) => {
       const { data } = await client.getState();
+      const spaceWs = new Map<string, string>();
+      for (const s of data.spaces ?? []) spaceWs.set(s.id, s.workspaceId);
       let boards = (data.boards ?? []).filter((b) => !b.archived);
       if (args?.spaceId) boards = boards.filter((b) => b.spaceId === args.spaceId);
+      if (args?.workspaceId)
+        boards = boards.filter((b) => spaceWs.get(b.spaceId) === args.workspaceId);
       return ok(
         boards.map((b) => ({
           id: b.id,
           name: b.name,
+          workspaceId: spaceWs.get(b.spaceId) ?? null,
           spaceId: b.spaceId,
           parentBoardId: b.parentBoardId,
           displayMode: b.displayMode,
@@ -55,10 +129,11 @@ export const tools = {
 
   list_cards: {
     description:
-      'List cards. Filter by boardId, done, archived, priorityOnly. Returns title, priority, deadline, scheduledFor, done, tags.',
+      'List cards. Filter by workspaceId, boardId, done, archived, priorityOnly. Each returned card includes workspaceId + boardId.',
     inputSchema: {
       type: 'object',
       properties: {
+        workspaceId: { type: 'string' },
         boardId: { type: 'string' },
         done: { type: 'boolean' },
         archived: { type: 'boolean' },
@@ -68,6 +143,9 @@ export const tools = {
     },
     handler: async (args: any, client: MaitoClient) => {
       const { data } = await client.getState();
+      const wsIdx = boardWsIndex(data);
+      const colToBoard = new Map<string, string>();
+      for (const col of data.columns ?? []) colToBoard.set(col.id, col.boardId);
       let cards = data.cards ?? [];
       if (args?.archived !== true) cards = cards.filter((c) => !c.archived);
       else cards = cards.filter((c) => c.archived);
@@ -77,6 +155,9 @@ export const tools = {
         const cols = (data.columns ?? []).filter((c) => c.boardId === args.boardId).map((c) => c.id);
         const set = new Set(cols);
         cards = cards.filter((c) => set.has(c.columnId));
+      }
+      if (args?.workspaceId) {
+        cards = cards.filter((c) => wsIdx.get(c.columnId) === args.workspaceId);
       }
       const limit = typeof args?.limit === 'number' ? args.limit : 100;
       return ok(
@@ -91,6 +172,8 @@ export const tools = {
           parentCardId: c.parentCardId,
           tagIds: c.tagIds,
           columnId: c.columnId,
+          boardId: colToBoard.get(c.columnId) ?? null,
+          workspaceId: wsIdx.get(c.columnId) ?? null,
         })),
       );
     },
@@ -98,7 +181,7 @@ export const tools = {
 
   create_card: {
     description:
-      'Create a new task card. If columnId omitted, places in the first column of boardId. Either columnId or boardId is required.',
+      'Create a new task card. Specify columnId (most precise) OR boardId (uses first column). The card inherits its workspace from the column/board.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -233,11 +316,13 @@ export const tools = {
   },
 
   search_notes: {
-    description: 'Search notes by title and body. Returns id + title + snippet.',
+    description:
+      'Search notes by title and body. Optionally scope to a workspace. Each hit includes workspaceId.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string' },
+        workspaceId: { type: 'string' },
         limit: { type: 'number' },
       },
       required: ['query'],
@@ -247,12 +332,16 @@ export const tools = {
       if (!q) return err('query required');
       const { data } = await client.getState();
       const hits = (data.notes ?? [])
-        .filter((n) => (n.title?.toLowerCase() ?? '').includes(q) || (n.body?.toLowerCase() ?? '').includes(q))
+        .filter((n) => {
+          if (args?.workspaceId && n.workspaceId !== args.workspaceId) return false;
+          return (n.title?.toLowerCase() ?? '').includes(q) || (n.body?.toLowerCase() ?? '').includes(q);
+        })
         .slice(0, args?.limit ?? 20)
         .map((n) => ({
           id: n.id,
           title: n.title,
           snippet: (n.body ?? '').slice(0, 200),
+          workspaceId: n.workspaceId,
           updatedAt: n.updatedAt,
         }));
       return ok(hits);
@@ -270,15 +359,24 @@ export const tools = {
       const { data } = await client.getState();
       const n = (data.notes ?? []).find((n) => n.id === args.id);
       if (!n) return err(`note ${args.id} not found`);
-      return ok({ id: n.id, title: n.title, body: n.body, tags: n.tags, pinned: !!n.pinned });
+      return ok({
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        tags: n.tags,
+        pinned: !!n.pinned,
+        workspaceId: n.workspaceId,
+      });
     },
   },
 
   create_note: {
-    description: 'Create a new note.',
+    description:
+      'Create a new note. workspaceId is required when the user has more than one workspace; otherwise the single workspace is used.',
     inputSchema: {
       type: 'object',
       properties: {
+        workspaceId: { type: 'string' },
         title: { type: 'string' },
         body: { type: 'string' },
       },
@@ -286,8 +384,14 @@ export const tools = {
     },
     handler: async (args: any, client: MaitoClient) => {
       const id = client.newId();
+      let failure: string | null = null;
       await client.mutate((draft) => {
-        const ws = activeWsId(draft) ?? '__workspace_default__';
+        const ws = resolveWorkspaceId(draft, args?.workspaceId);
+        if (!ws) {
+          failure =
+            'workspaceId is required — multiple workspaces exist. Call list_workspaces first and pass workspaceId.';
+          return;
+        }
         (draft.notes ??= []).push({
           id,
           workspaceId: ws,
@@ -301,22 +405,30 @@ export const tools = {
           updatedAt: now(),
         });
       });
+      if (failure) return err(failure);
       return ok({ id, ok: true });
     },
   },
 
   today_plan: {
     description:
-      'Return everything scheduled for today: cards (scheduledFor or deadline in [startOfDay, endOfDay)).',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async (_args: any, client: MaitoClient) => {
+      'Return everything scheduled for today. Optionally scope to a workspace. Each card includes workspaceId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceId: { type: 'string' },
+      },
+    },
+    handler: async (args: any, client: MaitoClient) => {
       const start = new Date(); start.setHours(0, 0, 0, 0);
       const end = new Date(start); end.setDate(end.getDate() + 1);
       const startT = start.getTime();
       const endT = end.getTime();
       const { data } = await client.getState();
+      const wsIdx = boardWsIndex(data);
       const cards = (data.cards ?? []).filter((c) => {
         if (c.archived || c.done) return false;
+        if (args?.workspaceId && wsIdx.get(c.columnId) !== args.workspaceId) return false;
         const s = c.scheduledFor ?? null;
         const d = c.deadline ?? null;
         return (s !== null && s >= startT && s < endT) || (d !== null && d >= startT && d < endT);
@@ -328,6 +440,7 @@ export const tools = {
           priority: !!c.priority,
           deadline: c.deadline,
           scheduledFor: c.scheduledFor,
+          workspaceId: wsIdx.get(c.columnId) ?? null,
         })),
         count: cards.length,
       });

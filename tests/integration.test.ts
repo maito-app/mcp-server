@@ -75,6 +75,7 @@ describe('MCP server integration', () => {
     const res = await client.listTools();
     const names = res.tools.map((t) => t.name).sort();
     for (const expected of [
+      'list_workspaces',
       'list_spaces',
       'list_boards',
       'list_cards',
