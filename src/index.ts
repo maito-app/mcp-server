@@ -6,7 +6,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { MaitoClient } from './client.js';
-import { tools } from './tools.js';
+import { buildTools, INSTRUCTIONS, type Tools } from './tools.js';
 
 function parseArgs(argv: string[]): { url: string; token: string } {
   const args: Record<string, string> = {};
@@ -33,25 +33,29 @@ async function main() {
   try {
     await client.health();
   } catch (e) {
-    // log to stderr so Claude Desktop user sees it, but don't kill the process
     console.error('[maito-mcp] warning: health check failed:', (e as Error).message);
   }
 
+  const tools = buildTools({ url, token });
+
   const server = new Server(
-    { name: 'maito', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    { name: 'maito', version: '0.1.4' },
+    {
+      capabilities: { tools: {} },
+      instructions: INSTRUCTIONS,
+    },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: Object.entries(tools).map(([name, t]) => ({
       name,
-      description: t.description,
-      inputSchema: t.inputSchema,
+      description: (t as any).description,
+      inputSchema: (t as any).inputSchema,
     })),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const name = req.params.name as keyof typeof tools;
+    const name = req.params.name as keyof Tools;
     const handler = tools[name];
     if (!handler) {
       return {
@@ -60,7 +64,7 @@ async function main() {
       };
     }
     try {
-      return await handler.handler(req.params.arguments ?? {}, client);
+      return await (handler as any).handler(req.params.arguments ?? {}, client);
     } catch (e: any) {
       return {
         content: [{ type: 'text', text: `Tool error: ${e?.message ?? e}` }],
