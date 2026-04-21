@@ -1,6 +1,6 @@
 {
   "name": "@maito-app/mcp-server",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MCP server for Maito — connect Claude/Cursor/Zed to your Maito workspace",
   "license": "AGPL-3.0-only",
   "homepage": "https://maito.romankov.dev",
@@ -29,6 +29,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bundle": "tsc -p tsconfig.json && node scripts/bundle.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "node --import tsx --test tests/*.test.ts"
@@ -38,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.11",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.2",
     "typescript": "^5.5.3"
   }

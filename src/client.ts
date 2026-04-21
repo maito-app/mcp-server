@@ -36,6 +36,25 @@ export class MaitoClient {
     return r.json();
   }
 
+  /**
+   * Scoped read endpoints — tiny responses, no full-state download.
+   * Use these for every read path; `getState` stays for `mutate` only.
+   */
+  async view<T = any>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
+    const qs = params
+      ? '?' + Object.entries(params)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+          .join('&')
+      : '';
+    const r = await fetch(`${this.baseUrl}/api/view/${path}${qs}`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (r.status === 404) throw new Error(`not_found: ${path}`);
+    if (!r.ok) throw new Error(`GET /api/view/${path}: ${r.status}`);
+    return r.json();
+  }
+
   async putState(data: Snapshot, expectedVersion: number): Promise<number> {
     const r = await fetch(`${this.baseUrl}/api/state`, {
       method: 'PUT',

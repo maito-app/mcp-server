@@ -14,55 +14,21 @@ function ok(obj: unknown) {
   };
 }
 
-function resolveWorkspaceId(data: Snapshot, argWs: unknown): string | null {
-  const all = (data.workspaces ?? []).filter((w) => !w.archived);
+function resolveWorkspaceIdFromList(workspaces: Array<{ id: string }>, argWs: unknown): string | null {
   if (typeof argWs === 'string' && argWs) {
-    const hit = all.find((w) => w.id === argWs);
-    return hit?.id ?? null;
+    return workspaces.find((w) => w.id === argWs)?.id ?? null;
   }
-  if (all.length === 1) return all[0].id;
+  if (workspaces.length === 1) return workspaces[0].id;
   return null;
 }
 
-function spaceToWs(data: Snapshot): Map<string, string> {
-  const m = new Map<string, string>();
-  for (const s of data.spaces ?? []) m.set(s.id, s.workspaceId);
-  return m;
-}
-
-function boardToWs(data: Snapshot): Map<string, string> {
-  const spaceWs = spaceToWs(data);
-  const m = new Map<string, string>();
-  for (const b of data.boards ?? []) {
-    const ws = spaceWs.get(b.spaceId);
-    if (ws) m.set(b.id, ws);
+function resolveWorkspaceIdFromDraft(draft: Snapshot, argWs: unknown): string | null {
+  const all = (draft.workspaces ?? []).filter((w) => !w.archived);
+  if (typeof argWs === 'string' && argWs) {
+    return all.find((w) => w.id === argWs)?.id ?? null;
   }
-  return m;
-}
-
-function colToBoard(data: Snapshot): Map<string, string> {
-  const m = new Map<string, string>();
-  for (const c of data.columns ?? []) m.set(c.id, c.boardId);
-  return m;
-}
-
-function colToWs(data: Snapshot): Map<string, string> {
-  const bWs = boardToWs(data);
-  const m = new Map<string, string>();
-  for (const c of data.columns ?? []) {
-    const ws = bWs.get(c.boardId);
-    if (ws) m.set(c.id, ws);
-  }
-  return m;
-}
-
-function tagsForCard(data: Snapshot, card: any): Array<{ id: string; name: string; color?: string }> {
-  const tagMap = new Map<string, any>();
-  for (const t of data.tags ?? []) tagMap.set(t.id, t);
-  return (card.tagIds ?? [])
-    .map((id: string) => tagMap.get(id))
-    .filter(Boolean)
-    .map((t: any) => ({ id: t.id, name: t.name, color: t.color }));
+  if (all.length === 1) return all[0].id;
+  return null;
 }
 
 function localTz(): string {
@@ -85,8 +51,6 @@ function parseJwtEmail(token: string): string | null {
 }
 
 function startOfDayInTz(tz: string, dayOffset = 0): number {
-  // Compute midnight of (today + dayOffset) in the given tz, return epoch ms.
-  // Uses Intl to render the current date in that tz, then builds a UTC timestamp.
   const now = new Date();
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
@@ -97,9 +61,7 @@ function startOfDayInTz(tz: string, dayOffset = 0): number {
   const y = Number(parts.find((p) => p.type === 'year')?.value);
   const m = Number(parts.find((p) => p.type === 'month')?.value);
   const d = Number(parts.find((p) => p.type === 'day')?.value);
-  // Build a UTC midnight then offset back by the zone's offset at that date.
   const utcMidnight = Date.UTC(y, m - 1, d) + dayOffset * 86400000;
-  // Discover tz offset at utcMidnight:
   const asString = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     timeZoneName: 'shortOffset',
@@ -115,64 +77,37 @@ export function buildTools(ctx: { url: string; token: string }) {
   return {
     whoami: {
       description:
-        'Identify the user and their environment. Returns email, local timezone of this MCP server process, count of workspaces, and the Maito instance URL. Call this first if you need user context (e.g. "what is MY today").',
+        'Identify the user and their environment. Returns email, local timezone of this MCP process, the Maito instance URL, and number of workspaces. Call first when you need user context.',
       inputSchema: { type: 'object', properties: {} },
       handler: async (_args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
+        const wss = await client.view<any[]>('workspaces');
         return ok({
           email: parseJwtEmail(ctx.token),
           timezone: localTz(),
           instanceUrl: ctx.url,
-          workspaces: (data.workspaces ?? []).filter((w) => !w.archived).length,
+          workspaces: wss.length,
         });
       },
     },
 
     list_workspaces: {
       description:
-        'List all workspaces. Each workspace is an isolated container — spaces, boards, cards, notes do not cross workspace boundaries. Call this first to orient yourself.',
+        'List all workspaces. Each workspace is an isolated container — spaces/boards/cards/notes do not cross workspace boundaries. Call this first to orient yourself.',
       inputSchema: { type: 'object', properties: {} },
       handler: async (_args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const wss = (data.workspaces ?? []).filter((w) => !w.archived);
-        const spaceCount = new Map<string, number>();
-        for (const s of data.spaces ?? []) {
-          if (!s.archived) spaceCount.set(s.workspaceId, (spaceCount.get(s.workspaceId) ?? 0) + 1);
-        }
-        return ok(
-          wss.map((w) => ({
-            id: w.id,
-            name: w.name,
-            spaces: spaceCount.get(w.id) ?? 0,
-          })),
-        );
+        return ok(await client.view('workspaces'));
       },
     },
 
     list_spaces: {
       description:
-        'List spaces. If workspaceId is omitted and there is exactly one workspace, uses it; otherwise returns all spaces labelled with workspaceId.',
+        'List spaces. If workspaceId is omitted and there is exactly one workspace, uses it; otherwise returns spaces from all workspaces labelled with workspaceId.',
       inputSchema: {
         type: 'object',
         properties: { workspaceId: { type: 'string' } },
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const wsFilter = resolveWorkspaceId(data, args?.workspaceId);
-        const spaces = (data.spaces ?? []).filter((s) => {
-          if (s.archived) return false;
-          if (args?.workspaceId) return s.workspaceId === args.workspaceId;
-          if (wsFilter) return s.workspaceId === wsFilter;
-          return true;
-        });
-        return ok(
-          spaces.map((s) => ({
-            id: s.id,
-            name: s.name,
-            workspaceId: s.workspaceId,
-            order: s.order,
-          })),
-        );
+        return ok(await client.view('spaces', { workspaceId: args?.workspaceId }));
       },
     },
 
@@ -187,29 +122,18 @@ export function buildTools(ctx: { url: string; token: string }) {
         },
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const spaceWs = spaceToWs(data);
-        let boards = (data.boards ?? []).filter((b) => !b.archived);
-        if (args?.spaceId) boards = boards.filter((b) => b.spaceId === args.spaceId);
-        if (args?.workspaceId)
-          boards = boards.filter((b) => spaceWs.get(b.spaceId) === args.workspaceId);
         return ok(
-          boards.map((b) => ({
-            id: b.id,
-            name: b.name,
-            workspaceId: spaceWs.get(b.spaceId) ?? null,
-            spaceId: b.spaceId,
-            parentBoardId: b.parentBoardId,
-            displayMode: b.displayMode,
-            layout: b.layout,
-          })),
+          await client.view('boards', {
+            workspaceId: args?.workspaceId,
+            spaceId: args?.spaceId,
+          }),
         );
       },
     },
 
     list_columns: {
       description:
-        'List columns (statuses) of a board, ordered left-to-right. Essential before create_card / update_card (move) to pick the right column by name.',
+        'List columns (statuses) of a board, ordered left-to-right. Use before create_card / update_card to pick the right column by name.',
       inputSchema: {
         type: 'object',
         properties: { boardId: { type: 'string' } },
@@ -217,17 +141,13 @@ export function buildTools(ctx: { url: string; token: string }) {
       },
       handler: async (args: any, client: MaitoClient) => {
         if (!args?.boardId) return err('boardId required');
-        const { data } = await client.getState();
-        const cols = (data.columns ?? [])
-          .filter((c) => c.boardId === args.boardId)
-          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-        return ok(cols.map((c) => ({ id: c.id, name: c.name, order: c.order })));
+        return ok(await client.view('columns', { boardId: args.boardId }));
       },
     },
 
     list_tags: {
       description:
-        'List tags. Tags in Maito are scoped to a space. Filter by spaceId or workspaceId. Use this to resolve tagIds to human-readable names before showing results.',
+        'List tags. Tags are scoped to a space. Filter by spaceId or workspaceId. Use to resolve tagIds to human-readable names.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -236,20 +156,11 @@ export function buildTools(ctx: { url: string; token: string }) {
         },
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const spaceWs = spaceToWs(data);
-        let tags = data.tags ?? [];
-        if (args?.spaceId) tags = tags.filter((t) => t.spaceId === args.spaceId);
-        if (args?.workspaceId)
-          tags = tags.filter((t) => spaceWs.get(t.spaceId) === args.workspaceId);
         return ok(
-          tags.map((t) => ({
-            id: t.id,
-            name: t.name,
-            color: t.color,
-            spaceId: t.spaceId,
-            workspaceId: spaceWs.get(t.spaceId) ?? null,
-          })),
+          await client.view('tags', {
+            spaceId: args?.spaceId,
+            workspaceId: args?.workspaceId,
+          }),
         );
       },
     },
@@ -269,90 +180,41 @@ export function buildTools(ctx: { url: string; token: string }) {
         },
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const wsIdx = colToWs(data);
-        const cb = colToBoard(data);
-        let cards = data.cards ?? [];
-        if (args?.archived !== true) cards = cards.filter((c) => !c.archived);
-        else cards = cards.filter((c) => c.archived);
-        if (typeof args?.done === 'boolean') cards = cards.filter((c) => !!c.done === args.done);
-        if (args?.priorityOnly) cards = cards.filter((c) => c.priority);
-        if (args?.boardId) {
-          const cols = new Set(
-            (data.columns ?? []).filter((c) => c.boardId === args.boardId).map((c) => c.id),
-          );
-          cards = cards.filter((c) => cols.has(c.columnId));
-        }
-        if (args?.workspaceId)
-          cards = cards.filter((c) => wsIdx.get(c.columnId) === args.workspaceId);
-        const limit = typeof args?.limit === 'number' ? args.limit : 100;
         return ok(
-          cards.slice(0, limit).map((c) => ({
-            id: c.id,
-            title: c.title,
-            done: !!c.done,
-            priority: !!c.priority,
-            isEpic: !!c.isEpic,
-            deadline: c.deadline,
-            scheduledFor: c.scheduledFor,
-            parentCardId: c.parentCardId,
-            tagIds: c.tagIds,
-            columnId: c.columnId,
-            boardId: cb.get(c.columnId) ?? null,
-            workspaceId: wsIdx.get(c.columnId) ?? null,
-          })),
+          await client.view('cards', {
+            workspaceId: args?.workspaceId,
+            boardId: args?.boardId,
+            done: typeof args?.done === 'boolean' ? String(args.done) : undefined,
+            archived: args?.archived === true ? 'true' : undefined,
+            priorityOnly: args?.priorityOnly === true ? 'true' : undefined,
+            limit: args?.limit,
+          }),
         );
       },
     },
 
     get_card: {
       description:
-        'Return a single card with full details: description, resolved tag names, journal entries (comments), subtasks (child cards), plus board/column/workspace context.',
+        'Return a single card with full details: description, resolved tag names, journal entries, subtasks, plus board/column/workspace context.',
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string' } },
         required: ['id'],
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const card = (data.cards ?? []).find((c) => c.id === args?.id);
-        if (!card) return err(`card ${args?.id} not found`);
-        const cb = colToBoard(data);
-        const wsIdx = colToWs(data);
-        const journal = (data.comments ?? [])
-          .filter((c) => c.cardId === card.id)
-          .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
-          .map((c) => ({ id: c.id, body: c.body, createdAt: c.createdAt }));
-        const subtasks = (data.cards ?? [])
-          .filter((c) => c.parentCardId === card.id && !c.archived)
-          .map((c) => ({ id: c.id, title: c.title, done: !!c.done, columnId: c.columnId }));
-        return ok({
-          id: card.id,
-          title: card.title,
-          description: card.description ?? '',
-          done: !!card.done,
-          priority: !!card.priority,
-          isEpic: !!card.isEpic,
-          archived: !!card.archived,
-          deadline: card.deadline,
-          scheduledFor: card.scheduledFor,
-          parentCardId: card.parentCardId,
-          repeat: card.repeat ?? null,
-          tags: tagsForCard(data, card),
-          columnId: card.columnId,
-          boardId: cb.get(card.columnId) ?? null,
-          workspaceId: wsIdx.get(card.columnId) ?? null,
-          createdAt: card.createdAt,
-          updatedAt: card.updatedAt,
-          journal,
-          subtasks,
-        });
+        if (!args?.id) return err('id required');
+        try {
+          return ok(await client.view(`card/${encodeURIComponent(args.id)}`));
+        } catch (e: any) {
+          if (String(e?.message).startsWith('not_found')) return err(`card ${args.id} not found`);
+          throw e;
+        }
       },
     },
 
     search_cards: {
       description:
-        'Full-text search across card titles and descriptions. Optionally scope to workspaceId / boardId. Returns summaries with workspaceId + boardId.',
+        'Full-text search across card titles and descriptions. Optionally scope to workspaceId / boardId.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -365,38 +227,22 @@ export function buildTools(ctx: { url: string; token: string }) {
         required: ['query'],
       },
       handler: async (args: any, client: MaitoClient) => {
-        const q = String(args?.query ?? '').toLowerCase();
-        if (!q) return err('query required');
-        const { data } = await client.getState();
-        const wsIdx = colToWs(data);
-        const cb = colToBoard(data);
-        let cards = (data.cards ?? []).filter(
-          (c) =>
-            (args?.includeArchived || !c.archived) &&
-            ((c.title?.toLowerCase() ?? '').includes(q) ||
-              (c.description?.toLowerCase() ?? '').includes(q)),
-        );
-        if (args?.workspaceId) cards = cards.filter((c) => wsIdx.get(c.columnId) === args.workspaceId);
-        if (args?.boardId) cards = cards.filter((c) => cb.get(c.columnId) === args.boardId);
+        if (!args?.query) return err('query required');
         return ok(
-          cards.slice(0, args?.limit ?? 30).map((c) => ({
-            id: c.id,
-            title: c.title,
-            done: !!c.done,
-            archived: !!c.archived,
-            deadline: c.deadline,
-            scheduledFor: c.scheduledFor,
-            boardId: cb.get(c.columnId) ?? null,
-            workspaceId: wsIdx.get(c.columnId) ?? null,
-            snippet: (c.description ?? '').slice(0, 160),
-          })),
+          await client.view('cards', {
+            workspaceId: args?.workspaceId,
+            boardId: args?.boardId,
+            query: args.query,
+            archived: args?.includeArchived === true ? 'true' : undefined,
+            limit: args?.limit ?? 30,
+          }),
         );
       },
     },
 
     create_card: {
       description:
-        'Create a task card. Either columnId (precise) or boardId (uses first column). Workspace is inherited from the column/board.',
+        'Create a task card. Either columnId (precise) or boardId (uses first column). Workspace inherited from column/board.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -406,7 +252,7 @@ export function buildTools(ctx: { url: string; token: string }) {
           boardId: { type: 'string' },
           priority: { type: 'boolean' },
           isEpic: { type: 'boolean' },
-          parentCardId: { type: 'string', description: 'Create as a subtask of this card.' },
+          parentCardId: { type: 'string' },
           deadline: { type: 'number', description: 'Epoch ms' },
           scheduledFor: { type: 'number', description: 'Epoch ms' },
           tagIds: { type: 'array', items: { type: 'string' } },
@@ -457,7 +303,7 @@ export function buildTools(ctx: { url: string; token: string }) {
 
     update_card: {
       description:
-        'Update card fields. patch can include columnId to MOVE a card to another column (e.g. mark as Done by moving to Done column). Set done:true to mark finished. Omit fields you do not want to change.',
+        'Update card fields. patch.columnId MOVES the card to another column (mark Done by moving, or pass done:true). Omit fields you do not want to change.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -469,7 +315,7 @@ export function buildTools(ctx: { url: string; token: string }) {
               description: { type: 'string' },
               priority: { type: 'boolean' },
               done: { type: 'boolean' },
-              columnId: { type: 'string', description: 'Move card to this column' },
+              columnId: { type: 'string' },
               deadline: { type: 'number' },
               scheduledFor: { type: 'number' },
               tagIds: { type: 'array', items: { type: 'string' } },
@@ -550,7 +396,7 @@ export function buildTools(ctx: { url: string; token: string }) {
         let createdId = '';
         let failure: string | null = null;
         await client.mutate((draft) => {
-          const ws = resolveWorkspaceId(draft, args?.workspaceId);
+          const ws = resolveWorkspaceIdFromDraft(draft, args?.workspaceId);
           if (!ws) {
             failure = 'workspaceId required — multiple workspaces exist.';
             return;
@@ -579,7 +425,7 @@ export function buildTools(ctx: { url: string; token: string }) {
 
     create_board: {
       description:
-        'Create a new board inside a space. The board is created with 3 default columns: Todo / In Progress / Done.',
+        'Create a new board inside a space. Spawns 3 default columns: Todo / In Progress / Done.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -610,8 +456,7 @@ export function buildTools(ctx: { url: string; token: string }) {
             layout: args.layout ?? 'board',
             archived: false,
           });
-          const cols = ['Todo', 'In Progress', 'Done'];
-          cols.forEach((name, i) => {
+          ['Todo', 'In Progress', 'Done'].forEach((name, i) => {
             (draft.columns ??= []).push({
               id: client.newId(),
               boardId: id,
@@ -654,7 +499,7 @@ export function buildTools(ctx: { url: string; token: string }) {
 
     search_notes: {
       description:
-        'Search notes by title and body. Optionally scope to workspace. Each hit includes workspaceId.',
+        'Search notes by title and body. Optionally scope to workspace.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -665,26 +510,14 @@ export function buildTools(ctx: { url: string; token: string }) {
         required: ['query'],
       },
       handler: async (args: any, client: MaitoClient) => {
-        const q = String(args?.query ?? '').toLowerCase();
-        if (!q) return err('query required');
-        const { data } = await client.getState();
-        const hits = (data.notes ?? [])
-          .filter((n) => {
-            if (args?.workspaceId && n.workspaceId !== args.workspaceId) return false;
-            return (
-              (n.title?.toLowerCase() ?? '').includes(q) ||
-              (n.body?.toLowerCase() ?? '').includes(q)
-            );
-          })
-          .slice(0, args?.limit ?? 20)
-          .map((n) => ({
-            id: n.id,
-            title: n.title,
-            snippet: (n.body ?? '').slice(0, 200),
-            workspaceId: n.workspaceId,
-            updatedAt: n.updatedAt,
-          }));
-        return ok(hits);
+        if (!args?.query) return err('query required');
+        return ok(
+          await client.view('notes', {
+            query: args.query,
+            workspaceId: args?.workspaceId,
+            limit: args?.limit ?? 20,
+          }),
+        );
       },
     },
 
@@ -696,23 +529,18 @@ export function buildTools(ctx: { url: string; token: string }) {
         required: ['id'],
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const n = (data.notes ?? []).find((n) => n.id === args.id);
-        if (!n) return err(`note ${args.id} not found`);
-        return ok({
-          id: n.id,
-          title: n.title,
-          body: n.body,
-          tags: n.tags,
-          pinned: !!n.pinned,
-          workspaceId: n.workspaceId,
-        });
+        if (!args?.id) return err('id required');
+        try {
+          return ok(await client.view(`note/${encodeURIComponent(args.id)}`));
+        } catch (e: any) {
+          if (String(e?.message).startsWith('not_found')) return err(`note ${args.id} not found`);
+          throw e;
+        }
       },
     },
 
     create_note: {
-      description:
-        'Create a new note. workspaceId is required when multiple workspaces exist.',
+      description: 'Create a new note. workspaceId required when multiple workspaces exist.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -726,7 +554,7 @@ export function buildTools(ctx: { url: string; token: string }) {
         const id = client.newId();
         let failure: string | null = null;
         await client.mutate((draft) => {
-          const ws = resolveWorkspaceId(draft, args?.workspaceId);
+          const ws = resolveWorkspaceIdFromDraft(draft, args?.workspaceId);
           if (!ws) {
             failure =
               'workspaceId required — multiple workspaces exist. Call list_workspaces first.';
@@ -752,94 +580,55 @@ export function buildTools(ctx: { url: string; token: string }) {
 
     today_plan: {
       description:
-        'Return cards scheduled for today in the local timezone of this MCP process (use whoami to see which tz). Filter by workspaceId. Pass dayOffset=1 for "tomorrow", -1 for "yesterday".',
+        'Return cards scheduled for today in the local timezone of this MCP process. Pass dayOffset=1 for tomorrow, -1 for yesterday. Filter by workspaceId.',
       inputSchema: {
         type: 'object',
         properties: {
           workspaceId: { type: 'string' },
-          dayOffset: { type: 'number', description: '0=today, 1=tomorrow, -1=yesterday' },
+          dayOffset: { type: 'number' },
         },
       },
       handler: async (args: any, client: MaitoClient) => {
         const tz = localTz();
         const offset = typeof args?.dayOffset === 'number' ? args.dayOffset : 0;
-        const startT = startOfDayInTz(tz, offset);
-        const endT = startT + 86400_000;
-        const { data } = await client.getState();
-        const wsIdx = colToWs(data);
-        const cards = (data.cards ?? []).filter((c) => {
-          if (c.archived || c.done) return false;
-          if (args?.workspaceId && wsIdx.get(c.columnId) !== args.workspaceId) return false;
-          const s = c.scheduledFor ?? null;
-          const d = c.deadline ?? null;
-          return (s !== null && s >= startT && s < endT) || (d !== null && d >= startT && d < endT);
+        const start = startOfDayInTz(tz, offset);
+        const end = start + 86400_000;
+        const res = await client.view<any>('today', {
+          start,
+          end,
+          workspaceId: args?.workspaceId,
         });
-        return ok({
-          timezone: tz,
-          window: { start: startT, end: endT },
-          count: cards.length,
-          cards: cards.map((c) => ({
-            id: c.id,
-            title: c.title,
-            priority: !!c.priority,
-            deadline: c.deadline,
-            scheduledFor: c.scheduledFor,
-            columnId: c.columnId,
-            workspaceId: wsIdx.get(c.columnId) ?? null,
-          })),
-        });
+        return ok({ timezone: tz, ...res });
       },
     },
 
     recent_activity: {
       description:
-        'Return the activity feed. Shows card_created, card_done, card_moved, board_created, space_created, note_created etc. Use this to answer "what did I do yesterday / last week".',
+        'Activity feed: card_created, card_done, card_moved, board_created, space_created, note_created, etc. Answers "what did I do recently".',
       inputSchema: {
         type: 'object',
         properties: {
-          since: { type: 'number', description: 'Epoch ms lower bound.' },
+          since: { type: 'number', description: 'Epoch ms lower bound' },
           workspaceId: { type: 'string' },
           limit: { type: 'number' },
         },
       },
       handler: async (args: any, client: MaitoClient) => {
-        const { data } = await client.getState();
-        const spaceWs = spaceToWs(data);
-        const bWs = boardToWs(data);
-        const cWs = colToWs(data);
-        const cardCol = new Map<string, string>();
-        for (const c of data.cards ?? []) cardCol.set(c.id, c.columnId);
-        const wsFor = (ev: any): string | null => {
-          if (ev.cardId) {
-            const col = cardCol.get(ev.cardId);
-            return col ? cWs.get(col) ?? null : null;
-          }
-          if (ev.boardId) return bWs.get(ev.boardId) ?? null;
-          if (ev.spaceId) return spaceWs.get(ev.spaceId) ?? null;
-          return null;
-        };
-        let events = (data.activity ?? []).slice();
-        events.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
-        if (typeof args?.since === 'number') events = events.filter((e) => (e.ts ?? 0) >= args.since);
-        if (args?.workspaceId) events = events.filter((e) => wsFor(e) === args.workspaceId);
-        events = events.slice(0, args?.limit ?? 50);
         return ok(
-          events.map((e) => ({
-            id: e.id,
-            ts: e.ts,
-            type: e.type,
-            title: e.title,
-            meta: e.meta,
-            cardId: e.cardId,
-            boardId: e.boardId,
-            spaceId: e.spaceId,
-            noteId: e.noteId,
-            workspaceId: wsFor(e),
-          })),
+          await client.view('activity', {
+            since: args?.since,
+            workspaceId: args?.workspaceId,
+            limit: args?.limit ?? 50,
+          }),
         );
       },
     },
   };
+}
+
+// Re-export for code that builds without `ctx` (legacy test imports).
+export function _resolveWorkspaceFromList(ws: Array<{ id: string }>, arg: unknown): string | null {
+  return resolveWorkspaceIdFromList(ws, arg);
 }
 
 export type Tools = ReturnType<typeof buildTools>;
